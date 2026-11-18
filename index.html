@@ -151,7 +151,16 @@ async function api(path, opts = {}, retry = true) {
   if (r.status === 204 || r.status === 202) return null;
   const text = await r.text();
   const j = text ? JSON.parse(text) : null;
-  if (!r.ok) throw new Error(j?.error?.message || ('HTTP ' + r.status));
+  if (!r.ok) {
+    const msg = j?.error?.message || (text || '').slice(0, 200) || 'sem detalhes';
+    let hint = '';
+    if (r.status === 403) {
+      if (/premium/i.test(msg)) hint = '\nControlar a reprodução exige Spotify Premium.';
+      else if (/not registered|development mode|user/i.test(msg)) hint = '\nA conta Spotify logada precisa ser a mesma do Developer Dashboard, ou estar adicionada em User Management no app do dashboard.';
+      else hint = '\nVerifique: conta logada é a mesma do dashboard? É Premium? O app no dashboard tem "Web API" marcado?';
+    }
+    throw new Error(`HTTP ${r.status} em ${path.replace(API, '')}: ${msg}${hint}`);
+  }
   return j;
 }
 async function pageAll(path, pick) {
@@ -167,12 +176,14 @@ let selected = null;
 async function loadSources() {
   setStatus('Carregando playlists...');
   const me = await api('/me');
+  if (me.product && me.product !== 'premium')
+    setStatus(`Conta "${me.display_name || me.id}" é ${me.product}. Tocar via API exige Premium; listar e montar a fila funcionam.`, true);
   const pls = await pageAll('/me/playlists?limit=50', p => ({ id:p.id, name:p.name, uri:p.uri, count:p.tracks?.total ?? 0, image:p.images?.[0]?.url, owner:p.owner?.id }))
   sources = [{ id: LIKED, name: 'Músicas Curtidas', count: null, image: null }]
     .concat(pls.filter(p => p.name !== HELPER_NAME));
   store.set('me', me.id);
   renderSources();
-  setStatus('');
+  if (!$('#status').classList.contains('err')) setStatus('');
 }
 function renderSources() {
   const el = $('#lists'); el.innerHTML = '';
@@ -223,13 +234,15 @@ async function go() {
   const src = sources.find(s => s.id === selected);
   if (!src) return;
   $('#go').disabled = true;
+  let step = 'início';
+  const setStep = (s) => { step = s; setStatus(s + '...'); };
   try {
-    setStatus('Lendo faixas...');
+    setStep('Lendo faixas');
     const all = [...new Set(await tracksOf(src))];
     if (!all.length) throw new Error('Nenhuma faixa encontrada.');
     store.set('tracks:' + src.id, all);
 
-    setStatus('Atualizando histórico...');
+    setStep('Atualizando histórico');
     await absorbRecentlyPlayed(sources.map(s => s.id));
     let hist = new Set(store.get('hist:' + src.id, []));
     const unplayed = all.filter(u => !hist.has(u));
@@ -238,13 +251,13 @@ async function go() {
     // Não ouvidas primeiro (ordem uniforme), depois as já ouvidas (ordem uniforme).
     const order = unplayed.length ? shuffle(unplayed).concat(shuffle(played)) : shuffle(all);
 
-    setStatus(`Montando fila (${order.length} faixas, ${unplayed.length} ainda não ouvidas)...`);
+    setStep(`Montando fila (${order.length} faixas, ${unplayed.length} ainda não ouvidas)`);
     const pid = await helperPlaylist();
     await api(`/playlists/${pid}/tracks`, { method:'PUT', body:{ uris: order.slice(0, 100) } });
     for (let i = 100; i < order.length; i += 100)
       await api(`/playlists/${pid}/tracks`, { method:'POST', body:{ uris: order.slice(i, i + 100) } });
 
-    setStatus('Procurando o Spotify no iPhone...');
+    setStep('Procurando o Spotify no iPhone');
     const dev = await api('/me/player/devices');
     const d = dev.devices.find(x => x.is_active) || dev.devices.find(x => x.type === 'Smartphone') || dev.devices[0];
     if (!d) throw new Error('Nenhum dispositivo. Abra o Spotify, toque qualquer música, pause e tente de novo.');
@@ -255,7 +268,7 @@ async function go() {
     setStatus(`Tocando em "${d.name}". ${order.length} faixas, ${unplayed.length} ainda não ouvidas vêm primeiro.\nDeixe o botão de aleatório do Spotify desligado.`);
     renderSources();
   } catch (e) {
-    setStatus('Erro: ' + e.message, true);
+    setStatus(`Erro na etapa "${step}": ${e.message}`, true);
   } finally { $('#go').disabled = false; }
 }
 
