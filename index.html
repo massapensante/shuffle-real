@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#121212">
+<title>Shuffle Real</title>
+<style>
+  :root { color-scheme: dark; --bg:#121212; --card:#1e1e1e; --fg:#f2f2f2; --muted:#9a9a9a; --green:#1ed760; --red:#ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font: 16px/1.4 -apple-system, system-ui, sans-serif;
+         padding: calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 24px); }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 20px; font-size: 14px; }
+  .card { background: var(--card); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+  label { display:block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  input[type=text] { width:100%; padding: 12px; border-radius: 10px; border: 1px solid #333; background:#0f0f0f; color:var(--fg); font-size: 15px; }
+  button { width:100%; padding: 14px; border:0; border-radius: 999px; background: var(--green); color:#000; font-weight: 700; font-size: 16px; margin-top: 10px; }
+  button.secondary { background:#2a2a2a; color:var(--fg); font-weight: 600; }
+  button:disabled { opacity: .5; }
+  .list { display:flex; flex-direction:column; gap: 6px; max-height: 50vh; overflow:auto; }
+  .item { display:flex; align-items:center; gap: 12px; padding: 10px; border-radius: 10px; background:#181818; }
+  .item.sel { outline: 2px solid var(--green); }
+  .item img { width: 44px; height: 44px; border-radius: 6px; background:#333; object-fit: cover; }
+  .item .name { font-weight: 600; font-size: 15px; }
+  .item .meta { color: var(--muted); font-size: 12px; }
+  .status { font-size: 14px; color: var(--muted); white-space: pre-wrap; min-height: 1.4em; }
+  .status.err { color: var(--red); }
+  .row { display:flex; gap: 10px; }
+  .row button { margin-top: 10px; }
+  small { color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>Shuffle Real</h1>
+<p class="sub">Aleatório uniforme, sem a inteligência do Spotify, priorizando faixas que você ainda não ouviu.</p>
+
+<div id="setup" class="card" hidden>
+  <label for="cid">Client ID do seu app no Spotify Developer Dashboard</label>
+  <input id="cid" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="ex.: 3f1a9c...">
+  <small>Redirect URI que você deve cadastrar no dashboard: <code id="redirect"></code></small>
+  <button id="login">Entrar com Spotify</button>
+</div>
+
+<div id="app" hidden>
+  <div class="card">
+    <label>Fonte</label>
+    <div id="lists" class="list"></div>
+    <div class="row">
+      <button id="reload" class="secondary">Recarregar playlists</button>
+      <button id="logout" class="secondary">Sair</button>
+    </div>
+  </div>
+  <div class="card">
+    <button id="go" disabled>Embaralhar e tocar</button>
+    <button id="reset" class="secondary">Zerar histórico desta fonte</button>
+    <p class="status" id="status"></p>
+    <small>Abra o Spotify no iPhone antes (ou deixe tocando algo) para ele aparecer como dispositivo ativo.</small>
+  </div>
+</div>
+
+<script>
+/* ---------- config ---------- */
+const SCOPES = [
+  'playlist-read-private','playlist-read-collaborative','playlist-modify-private',
+  'user-library-read','user-read-playback-state','user-modify-playback-state','user-read-recently-played'
+].join(' ');
+const REDIRECT = location.origin + location.pathname;
+const HELPER_NAME = 'Shuffle Real (fila)';
+const API = 'https://api.spotify.com/v1';
+const LIKED = 'liked';
+
+const $ = (s) => document.querySelector(s);
+const store = {
+  get: (k, d=null) => { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+  del: (k) => { try { localStorage.removeItem(k); } catch {} },
+};
+const setStatus = (msg, err=false) => { const el = $('#status'); el.textContent = msg; el.classList.toggle('err', err); };
+
+/* ---------- random ---------- */
+// Inteiro uniforme em [0, n) sem viés de módulo.
+function randInt(n) {
+  if (n <= 1) return 0;
+  const max = Math.floor(0x100000000 / n) * n;
+  const buf = new Uint32Array(1);
+  let x;
+  do { crypto.getRandomValues(buf); x = buf[0]; } while (x >= max);
+  return x % n;
+}
+// Fisher-Yates: toda permutação tem a mesma probabilidade.
+function shuffle(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) { const j = randInt(i + 1); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+
+/* ---------- PKCE auth ---------- */
+const b64url = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+async function sha256(str) { return crypto.subtle.digest('SHA-256', new TextEncoder().encode(str)); }
+function randomString(len) { const a = new Uint8Array(len); crypto.getRandomValues(a); return Array.from(a, b => 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[b % 62]).join(''); }
+
+async function login() {
+  const cid = $('#cid').value.trim();
+  if (!cid) return setStatus('Cole o Client ID primeiro.', true);
+  store.set('client_id', cid);
+  const verifier = randomString(64);
+  store.set('pkce_verifier', verifier);
+  const challenge = b64url(await sha256(verifier));
+  const p = new URLSearchParams({ response_type:'code', client_id:cid, scope:SCOPES, redirect_uri:REDIRECT,
+    code_challenge_method:'S256', code_challenge:challenge });
+  location.href = 'https://accounts.spotify.com/authorize?' + p;
+}
+async function tokenRequest(body) {
+  const r = await fetch('https://accounts.spotify.com/api/token', { method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:new URLSearchParams(body) });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error_description || j.error || 'Falha no token');
+  store.set('token', { access: j.access_token, refresh: j.refresh_token || store.get('token')?.refresh, exp: Date.now() + (j.expires_in - 60) * 1000 });
+}
+async function handleCallback() {
+  const u = new URL(location.href);
+  const code = u.searchParams.get('code'), err = u.searchParams.get('error');
+  if (!code && !err) return;
+  history.replaceState({}, '', REDIRECT);
+  if (err) throw new Error('Login recusado: ' + err);
+  await tokenRequest({ grant_type:'authorization_code', code, redirect_uri:REDIRECT,
+    client_id: store.get('client_id'), code_verifier: store.get('pkce_verifier') });
+  store.del('pkce_verifier');
+}
+async function accessToken() {
+  const t = store.get('token');
+  if (!t) return null;
+  if (Date.now() < t.exp) return t.access;
+  if (!t.refresh) return null;
+  await tokenRequest({ grant_type:'refresh_token', refresh_token:t.refresh, client_id: store.get('client_id') });
+  return store.get('token').access;
+}
+function logout() { store.del('token'); location.reload(); }
+
+/* ---------- API ---------- */
+async function api(path, opts = {}, retry = true) {
+  const tok = await accessToken();
+  if (!tok) { logout(); throw new Error('Sessão expirada'); }
+  const r = await fetch(path.startsWith('http') ? path : API + path, {
+    ...opts, headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json', ...(opts.headers||{}) },
+    body: opts.body ? JSON.stringify(opts.body) : undefined });
+  if (r.status === 429 && retry) { await new Promise(res => setTimeout(res, (Number(r.headers.get('Retry-After')) || 1) * 1000 + 200)); return api(path, opts, false); }
+  if (r.status === 204 || r.status === 202) return null;
+  const text = await r.text();
+  const j = text ? JSON.parse(text) : null;
+  if (!r.ok) throw new Error(j?.error?.message || ('HTTP ' + r.status));
+  return j;
+}
+async function pageAll(path, pick) {
+  let out = [], url = path;
+  while (url) { const j = await api(url); out = out.concat(j.items.map(pick).filter(Boolean)); url = j.next; }
+  return out;
+}
+
+/* ---------- state ---------- */
+let sources = [];      // {id, name, uri, count, image}
+let selected = null;
+
+async function loadSources() {
+  setStatus('Carregando playlists...');
+  const me = await api('/me');
+  const pls = await pageAll('/me/playlists?limit=50', p => ({ id:p.id, name:p.name, uri:p.uri, count:p.tracks?.total ?? 0, image:p.images?.[0]?.url, owner:p.owner?.id }))
+  sources = [{ id: LIKED, name: 'Músicas Curtidas', count: null, image: null }]
+    .concat(pls.filter(p => p.name !== HELPER_NAME));
+  store.set('me', me.id);
+  renderSources();
+  setStatus('');
+}
+function renderSources() {
+  const el = $('#lists'); el.innerHTML = '';
+  for (const s of sources) {
+    const d = document.createElement('div');
+    d.className = 'item' + (selected === s.id ? ' sel' : '');
+    d.innerHTML = `<img src="${s.image || ''}" alt=""><div><div class="name"></div><div class="meta"></div></div>`;
+    d.querySelector('.name').textContent = s.name;
+    const hist = store.get('hist:' + s.id, []).length;
+    d.querySelector('.meta').textContent = (s.count != null ? s.count + ' faixas · ' : '') + hist + ' já ouvidas';
+    d.onclick = () => { selected = s.id; store.set('selected', s.id); renderSources(); $('#go').disabled = false; };
+    el.appendChild(d);
+  }
+}
+
+async function tracksOf(src) {
+  if (src.id === LIKED) return pageAll('/me/tracks?limit=50', i => i.track && !i.track.is_local && i.track.uri);
+  return pageAll(`/playlists/${src.id}/items?limit=100&fields=next,items(item(uri,is_local,type))`, i => i.item && i.item.type === 'track' && !i.item.is_local && i.item.uri)
+    .catch(() => pageAll(`/playlists/${src.id}/tracks?limit=100&fields=next,items(track(uri,is_local,type))`, i => i.track && i.track.type === 'track' && !i.track.is_local && i.track.uri));
+}
+
+// Histórico: o que você realmente ouviu, segundo o Spotify (últimas 50 reproduções), acumulado a cada uso.
+async function absorbRecentlyPlayed(allSrcIds) {
+  const j = await api('/me/player/recently-played?limit=50').catch(() => null);
+  if (!j) return;
+  const uris = new Set(j.items.map(i => i.track?.uri).filter(Boolean));
+  for (const id of allSrcIds) {
+    const key = 'hist:' + id, trackKey = 'tracks:' + id;
+    const known = new Set(store.get(trackKey, []));
+    if (!known.size) continue;
+    const h = new Set(store.get(key, []));
+    for (const u of uris) if (known.has(u)) h.add(u);
+    store.set(key, [...h]);
+  }
+}
+
+async function helperPlaylist() {
+  let id = store.get('helper_id');
+  if (id) { const ok = await api('/playlists/' + id + '?fields=id').catch(() => null); if (ok) return id; }
+  const me = store.get('me') || (await api('/me')).id;
+  const p = await api(`/users/${me}/playlists`, { method:'POST', body:{ name: HELPER_NAME, public:false,
+    description:'Fila gerada pelo app Shuffle Real. Pode apagar; ela é recriada.' } });
+  store.set('helper_id', p.id);
+  return p.id;
+}
+
+async function go() {
+  const src = sources.find(s => s.id === selected);
+  if (!src) return;
+  $('#go').disabled = true;
+  try {
+    setStatus('Lendo faixas...');
+    const all = [...new Set(await tracksOf(src))];
+    if (!all.length) throw new Error('Nenhuma faixa encontrada.');
+    store.set('tracks:' + src.id, all);
+
+    setStatus('Atualizando histórico...');
+    await absorbRecentlyPlayed(sources.map(s => s.id));
+    let hist = new Set(store.get('hist:' + src.id, []));
+    const unplayed = all.filter(u => !hist.has(u));
+    const played = all.filter(u => hist.has(u));
+    if (unplayed.length === 0) { hist = new Set(); store.set('hist:' + src.id, []); }
+    // Não ouvidas primeiro (ordem uniforme), depois as já ouvidas (ordem uniforme).
+    const order = unplayed.length ? shuffle(unplayed).concat(shuffle(played)) : shuffle(all);
+
+    setStatus(`Montando fila (${order.length} faixas, ${unplayed.length} ainda não ouvidas)...`);
+    const pid = await helperPlaylist();
+    await api(`/playlists/${pid}/tracks`, { method:'PUT', body:{ uris: order.slice(0, 100) } });
+    for (let i = 100; i < order.length; i += 100)
+      await api(`/playlists/${pid}/tracks`, { method:'POST', body:{ uris: order.slice(i, i + 100) } });
+
+    setStatus('Procurando o Spotify no iPhone...');
+    const dev = await api('/me/player/devices');
+    const d = dev.devices.find(x => x.is_active) || dev.devices.find(x => x.type === 'Smartphone') || dev.devices[0];
+    if (!d) throw new Error('Nenhum dispositivo. Abra o Spotify, toque qualquer música, pause e tente de novo.');
+    const q = '?device_id=' + d.id;
+    await api('/me/player/shuffle' + q + '&state=false', { method:'PUT' }).catch(() => {});
+    await api('/me/player/play' + q, { method:'PUT', body:{ context_uri: 'spotify:playlist:' + pid, offset:{ position:0 } } });
+    await api('/me/player/shuffle' + q + '&state=false', { method:'PUT' }).catch(() => {});
+    setStatus(`Tocando em "${d.name}". ${order.length} faixas, ${unplayed.length} ainda não ouvidas vêm primeiro.\nDeixe o botão de aleatório do Spotify desligado.`);
+    renderSources();
+  } catch (e) {
+    setStatus('Erro: ' + e.message, true);
+  } finally { $('#go').disabled = false; }
+}
+
+/* ---------- boot ---------- */
+(async () => {
+  $('#redirect').textContent = REDIRECT;
+  $('#cid').value = store.get('client_id', '');
+  $('#login').onclick = login;
+  $('#logout').onclick = logout;
+  $('#reload').onclick = loadSources;
+  $('#go').onclick = go;
+  $('#reset').onclick = () => { if (selected) { store.del('hist:' + selected); renderSources(); setStatus('Histórico zerado.'); } };
+  try { await handleCallback(); } catch (e) { setStatus(e.message, true); }
+  if (await accessToken().catch(() => null)) {
+    $('#app').hidden = false;
+    selected = store.get('selected');
+    $('#go').disabled = !selected;
+    await loadSources().catch(e => setStatus('Erro: ' + e.message, true));
+  } else {
+    $('#setup').hidden = false;
+  }
+})();
+</script>
+</body>
+</html>
