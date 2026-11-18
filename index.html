@@ -157,6 +157,7 @@ async function api(path, opts = {}, retry = true) {
     if (r.status === 403) {
       if (/premium/i.test(msg)) hint = '\nControlar a reprodução exige Spotify Premium.';
       else if (/not registered|development mode|user/i.test(msg)) hint = '\nA conta Spotify logada precisa ser a mesma do Developer Dashboard, ou estar adicionada em User Management no app do dashboard.';
+      else if (/^\/playlists\/[^/]+\/items/.test(path) && opts.method !== 'PUT' && opts.method !== 'POST') hint = '\nO Spotify só deixa ler o conteúdo de playlists suas ou em que você colabora. Playlists editoriais do Spotify não funcionam; salve uma cópia sua delas.';
       else hint = '\nVerifique: conta logada é a mesma do dashboard? É Premium? O app no dashboard tem "Web API" marcado?';
     }
     throw new Error(`HTTP ${r.status} em ${path.replace(API, '')}: ${msg}${hint}`);
@@ -178,7 +179,7 @@ async function loadSources() {
   const me = await api('/me');
   if (me.product && me.product !== 'premium')
     setStatus(`Conta "${me.display_name || me.id}" é ${me.product}. Tocar via API exige Premium; listar e montar a fila funcionam.`, true);
-  const pls = await pageAll('/me/playlists?limit=50', p => ({ id:p.id, name:p.name, uri:p.uri, count:p.tracks?.total ?? 0, image:p.images?.[0]?.url, owner:p.owner?.id }))
+  const pls = await pageAll('/me/playlists?limit=50', p => ({ id:p.id, name:p.name, uri:p.uri, count:p.items?.total ?? p.tracks?.total ?? null, image:p.images?.[0]?.url, owner:p.owner?.id }))
   sources = [{ id: LIKED, name: 'Músicas Curtidas', count: null, image: null }]
     .concat(pls.filter(p => p.name !== HELPER_NAME));
   store.set('me', me.id);
@@ -193,7 +194,7 @@ function renderSources() {
     d.innerHTML = `<img src="${s.image || ''}" alt=""><div><div class="name"></div><div class="meta"></div></div>`;
     d.querySelector('.name').textContent = s.name;
     const hist = store.get('hist:' + s.id, []).length;
-    d.querySelector('.meta').textContent = (s.count != null ? s.count + ' faixas · ' : '') + hist + ' já ouvidas';
+    d.querySelector('.meta').textContent = (s.count != null ? s.count + ' faixas · ' : '') + hist + ' já ouvidas' + (s.owner && s.owner !== store.get('me') ? ' · de ' + s.owner : '');
     d.onclick = () => { selected = s.id; store.set('selected', s.id); renderSources(); $('#go').disabled = false; };
     el.appendChild(d);
   }
@@ -224,7 +225,7 @@ async function helperPlaylist() {
   let id = store.get('helper_id');
   if (id) { const ok = await api('/playlists/' + id + '?fields=id').catch(() => null); if (ok) return id; }
   const me = store.get('me') || (await api('/me')).id;
-  const p = await api(`/users/${me}/playlists`, { method:'POST', body:{ name: HELPER_NAME, public:false,
+  const p = await api('/me/playlists', { method:'POST', body:{ name: HELPER_NAME, public:false,
     description:'Fila gerada pelo app Shuffle Real. Pode apagar; ela é recriada.' } });
   store.set('helper_id', p.id);
   return p.id;
@@ -253,9 +254,9 @@ async function go() {
 
     setStep(`Montando fila (${order.length} faixas, ${unplayed.length} ainda não ouvidas)`);
     const pid = await helperPlaylist();
-    await api(`/playlists/${pid}/tracks`, { method:'PUT', body:{ uris: order.slice(0, 100) } });
+    await api(`/playlists/${pid}/items`, { method:'PUT', body:{ uris: order.slice(0, 100) } });
     for (let i = 100; i < order.length; i += 100)
-      await api(`/playlists/${pid}/tracks`, { method:'POST', body:{ uris: order.slice(i, i + 100) } });
+      await api(`/playlists/${pid}/items`, { method:'POST', body:{ uris: order.slice(i, i + 100) } });
 
     setStep('Procurando o Spotify no iPhone');
     const dev = await api('/me/player/devices');

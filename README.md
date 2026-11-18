@@ -59,6 +59,11 @@ como não ouvido.
 
 ## Limites
 
+- Desde fevereiro de 2026 a API só entrega o conteúdo de playlists **suas ou em que você
+  colabora**. Playlists editoriais do Spotify ou de outras pessoas dão erro 403; salve uma cópia
+  na sua biblioteca ("Adicionar a outra playlist" → nova playlist) e use a cópia.
+- O Spotify limita apps em modo de desenvolvimento a 5 usuários autorizados e exige Premium.
+
 - O histórico só sabe o que o Spotify informa nas últimas 50 reproduções. Se você ouvir mais
   de 50 faixas entre dois usos do app, as mais antigas não entram no histórico.
 - Smart Shuffle e recomendações do Spotify não interferem: a reprodução é de uma playlist
